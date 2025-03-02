@@ -1,5 +1,8 @@
 # app.py
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
@@ -12,10 +15,8 @@ import os
 import logging
 import openai
 import atexit
+import requests
 from config import DevelopmentConfig, ProductionConfig
-from dotenv import load_dotenv
-
-load_dotenv()
 
 app = Flask(__name__)
 
@@ -28,6 +29,9 @@ if env == 'development':
 else:
     app.config.from_object(ProductionConfig)
 
+BING_API_KEY = app.config['BING_API_KEY']
+OPENAI_API_KEY = app.config['OPENAI_API_KEY']
+
 # Initialize CORS with the correct origins based on environment
 CORS(app, supports_credentials=True, origins=app.config['CORS_ORIGINS'])
 
@@ -37,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 # Add logging to confirm environment
 logger.info(f"Flask application is running in {app.config['ENV']} mode.")
+logger.debug(BING_API_KEY)
 
 # Initialize Flask-Login
 login_manager = LoginManager()
@@ -147,7 +152,7 @@ def init_db():
 def auto_login_dev_user():
     global dev_login_done
     # Only run once, and only if in development
-    if not dev_login_done and app.config['APP_ENV'] == 'development':
+    if not dev_login_done and env == 'development':
         try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
@@ -232,9 +237,13 @@ def bing_news_search(query):
         "textDecorations": True,
         "textFormat": "HTML"
     }
-    response = requests.get(url, headers=headers, params=params)
-    response.raise_for_status()
-    return response.json()
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        logger.exception(f"bing_news_search error: {e}")
+        return jsonify({'error': str(e)}), 500
 
 def process_news_results(results):
     if 'value' in results:
@@ -374,14 +383,9 @@ def logout():
 @app.route('/search', methods=['POST'])
 def search():
     data = request.get_json()
-    query = data.get('query')
+    query = data.get('query') if data else None
+    logger.debug(f"query={query}")
     
-    # Intent Clarification
-    # needs_clarification = clarify_intent(query)
-    # if needs_clarification.lower() == 'yes':
-    #     return jsonify({'clarification_needed': True, 'message': 'Please provide more context for your query.'})
-
-    # Save the search query
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('INSERT INTO searches (query) VALUES (?)', (query,))
@@ -390,6 +394,7 @@ def search():
     # Perform Bing News Search
     try:
         results = bing_news_search(query)
+        logger.debug(f"results={results}")
         processed_results = process_news_results(results)
     except Exception as e:
         conn.close()
